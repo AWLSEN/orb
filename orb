@@ -1,0 +1,554 @@
+#!/bin/bash
+# Orbiter - Barebones plan sync for Starry Night
+# Usage: orb <command> [args]
+
+set -euo pipefail
+
+VERSION="0.1.0-barebones"
+COMMS_BASE="$HOME/comms/plans"
+CONFIG_DIR="$HOME/.orbiter"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Initialize config if it doesn't exist
+init_config() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        mkdir -p "$CONFIG_DIR"
+        cat > "$CONFIG_FILE" <<EOF
+{
+  "version": "$VERSION",
+  "syncPath": "",
+  "namespaces": []
+}
+EOF
+        echo -e "${GREEN}✓${NC} Initialized orbiter config at $CONFIG_FILE"
+    fi
+}
+
+# Get config value
+get_config() {
+    local key="$1"
+    jq -r ".$key // empty" "$CONFIG_FILE" 2>/dev/null || echo ""
+}
+
+# Set config value
+set_config() {
+    local key="$1"
+    local value="$2"
+    local tmp_file=$(mktemp)
+
+    jq --arg key "$key" --arg val "$value" '.[$key] = $val' "$CONFIG_FILE" > "$tmp_file"
+    mv "$tmp_file" "$CONFIG_FILE"
+}
+
+# Add namespace to sync list
+add_namespace() {
+    local namespace="$1"
+    local tmp_file=$(mktemp)
+
+    # Check if namespace exists
+    if [ ! -d "$COMMS_BASE/$namespace" ]; then
+        echo -e "${RED}✗${NC} Namespace '$namespace' not found in $COMMS_BASE"
+        exit 1
+    fi
+
+    # Check if already added
+    local existing=$(jq -r --arg ns "$namespace" '.namespaces[] | select(. == $ns)' "$CONFIG_FILE" 2>/dev/null || echo "")
+    if [ -n "$existing" ]; then
+        echo -e "${YELLOW}⚠${NC} Namespace '$namespace' already configured"
+        return 0
+    fi
+
+    jq --arg ns "$namespace" '.namespaces += [$ns]' "$CONFIG_FILE" > "$tmp_file"
+    mv "$tmp_file" "$CONFIG_FILE"
+
+    echo -e "${GREEN}✓${NC} Added namespace: $namespace"
+}
+
+# Remove namespace from sync list
+remove_namespace() {
+    local namespace="$1"
+    local tmp_file=$(mktemp)
+
+    jq --arg ns "$namespace" '.namespaces -= [$ns]' "$CONFIG_FILE" > "$tmp_file"
+    mv "$tmp_file" "$CONFIG_FILE"
+
+    echo -e "${GREEN}✓${NC} Removed namespace: $namespace"
+}
+
+# List configured namespaces
+list_namespaces() {
+    echo -e "${BLUE}Configured namespaces:${NC}"
+    jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "  (none)"
+}
+
+# Push plans to sync location
+push_plans() {
+    local sync_path=$(get_config "syncPath")
+
+    if [ -z "$sync_path" ]; then
+        echo -e "${RED}✗${NC} Sync path not configured. Run: orb config set-sync-path <path>"
+        exit 1
+    fi
+
+    if [ ! -d "$sync_path" ]; then
+        mkdir -p "$sync_path"
+        echo -e "${GREEN}✓${NC} Created sync directory: $sync_path"
+    fi
+
+    local namespaces=$(jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "")
+
+    if [ -z "$namespaces" ]; then
+        echo -e "${YELLOW}⚠${NC} No namespaces configured. Run: orb config add <namespace>"
+        exit 1
+    fi
+
+    echo -e "${BLUE}Pushing plans...${NC}"
+
+    local pushed_count=0
+    while IFS= read -r namespace; do
+        if [ ! -d "$COMMS_BASE/$namespace" ]; then
+            echo -e "${YELLOW}⚠${NC} Skipping missing namespace: $namespace"
+            continue
+        fi
+
+        echo -e "  ${namespace}"
+
+        # Create namespace directory in sync location
+        mkdir -p "$sync_path/$namespace"
+
+        # Copy board.json
+        if [ -f "$COMMS_BASE/$namespace/board.json" ]; then
+            cp "$COMMS_BASE/$namespace/board.json" "$sync_path/$namespace/board.json"
+        fi
+
+        # Copy active plans
+        if [ -d "$COMMS_BASE/$namespace/active" ]; then
+            rsync -a --delete "$COMMS_BASE/$namespace/active/" "$sync_path/$namespace/active/"
+        fi
+
+        # Copy queued plans
+        if [ -d "$COMMS_BASE/$namespace/queued" ]; then
+            rsync -a --delete "$COMMS_BASE/$namespace/queued/" "$sync_path/$namespace/queued/"
+        fi
+
+        # Add timestamp
+        echo "{\"lastPush\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\", \"pushedBy\": \"$(whoami)@$(hostname)\"}" > "$sync_path/$namespace/.meta.json"
+
+        pushed_count=$((pushed_count + 1))
+    done <<< "$namespaces"
+
+    echo -e "${GREEN}✓${NC} Pushed $pushed_count namespace(s)"
+}
+
+# Pull plans from sync location
+pull_plans() {
+    local sync_path=$(get_config "syncPath")
+
+    if [ -z "$sync_path" ]; then
+        echo -e "${RED}✗${NC} Sync path not configured. Run: orb config set-sync-path <path>"
+        exit 1
+    fi
+
+    if [ ! -d "$sync_path" ]; then
+        echo -e "${RED}✗${NC} Sync directory not found: $sync_path"
+        exit 1
+    fi
+
+    local namespaces=$(jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "")
+
+    if [ -z "$namespaces" ]; then
+        echo -e "${YELLOW}⚠${NC} No namespaces configured. Run: orb config add <namespace>"
+        exit 1
+    fi
+
+    echo -e "${BLUE}Pulling plans...${NC}"
+
+    local pulled_count=0
+    while IFS= read -r namespace; do
+        if [ ! -d "$sync_path/$namespace" ]; then
+            echo -e "${YELLOW}⚠${NC} Skipping missing remote namespace: $namespace"
+            continue
+        fi
+
+        echo -e "  ${namespace}"
+
+        # Create local namespace directory if it doesn't exist
+        mkdir -p "$COMMS_BASE/$namespace"
+
+        # Merge board.json (newest wins for now - barebones approach)
+        if [ -f "$sync_path/$namespace/board.json" ]; then
+            if [ -f "$COMMS_BASE/$namespace/board.json" ]; then
+                # Simple merge: combine plans, remove duplicates by id, keep newest
+                local tmp_file=$(mktemp)
+                jq -s '
+                    .[0] as $local | .[1] as $remote |
+                    {
+                        project: ($local.project // $remote.project),
+                        plans: ([$local.plans[], $remote.plans[]] |
+                                group_by(.id) |
+                                map(max_by(.createdAt // "1970-01-01T00:00:00Z")))
+                    }
+                ' "$COMMS_BASE/$namespace/board.json" "$sync_path/$namespace/board.json" > "$tmp_file"
+                mv "$tmp_file" "$COMMS_BASE/$namespace/board.json"
+            else
+                cp "$sync_path/$namespace/board.json" "$COMMS_BASE/$namespace/board.json"
+            fi
+        fi
+
+        # Sync active plans (newest wins)
+        if [ -d "$sync_path/$namespace/active" ]; then
+            mkdir -p "$COMMS_BASE/$namespace/active"
+            rsync -a -u "$sync_path/$namespace/active/" "$COMMS_BASE/$namespace/active/"
+        fi
+
+        # Sync queued plans (newest wins)
+        if [ -d "$sync_path/$namespace/queued" ]; then
+            mkdir -p "$COMMS_BASE/$namespace/queued"
+            rsync -a -u "$sync_path/$namespace/queued/" "$COMMS_BASE/$namespace/queued/"
+        fi
+
+        pulled_count=$((pulled_count + 1))
+    done <<< "$namespaces"
+
+    echo -e "${GREEN}✓${NC} Pulled $pulled_count namespace(s)"
+}
+
+# Show status
+show_status() {
+    local sync_path=$(get_config "syncPath")
+
+    echo -e "${BLUE}Orbiter Status${NC}"
+    echo "  Version: $VERSION"
+    echo "  Sync path: ${sync_path:-"(not configured)"}"
+    echo ""
+
+    list_namespaces
+
+    if [ -n "$sync_path" ] && [ -d "$sync_path" ]; then
+        echo ""
+        echo -e "${BLUE}Remote namespaces:${NC}"
+        for dir in "$sync_path"/*; do
+            if [ -d "$dir" ]; then
+                local ns=$(basename "$dir")
+                local meta=""
+                if [ -f "$dir/.meta.json" ]; then
+                    meta=$(jq -r '"  Last push: " + .lastPush + " by " + .pushedBy' "$dir/.meta.json" 2>/dev/null || echo "")
+                fi
+                echo "  $ns"
+                [ -n "$meta" ] && echo "$meta"
+            fi
+        done
+    fi
+}
+
+# Start orbiter server
+serve_plans() {
+    local port=3000
+    local public=false
+    local host="127.0.0.1"
+
+    # Parse flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)
+                port="$2"
+                shift 2
+                ;;
+            --public)
+                public=true
+                shift
+                ;;
+            --host)
+                host="$2"
+                shift 2
+                ;;
+            *)
+                echo -e "${RED}✗${NC} Unknown serve option: $1"
+                exit 1
+                ;;
+        esac
+    done
+
+    # Create server directory
+    local server_dir="$CONFIG_DIR/server"
+    mkdir -p "$server_dir"
+
+    echo -e "${BLUE}Starting Orbiter Server${NC}"
+    echo "  Port: $port"
+    echo "  Host: $host"
+    echo ""
+
+    # Start ngrok if --public flag is set
+    local ngrok_pid=""
+    if [ "$public" = true ]; then
+        if ! command -v ngrok &> /dev/null; then
+            echo -e "${RED}✗${NC} ngrok not installed. Install it:"
+            echo "  macOS: brew install ngrok"
+            echo "  Linux: snap install ngrok"
+            echo "  Or download: https://ngrok.com/download"
+            exit 1
+        fi
+
+        echo -e "${BLUE}Starting ngrok tunnel...${NC}"
+        ngrok http "$port" --log=stdout > "$server_dir/ngrok.log" 2>&1 &
+        ngrok_pid=$!
+
+        # Wait for ngrok to start and get URL
+        sleep 2
+        local ngrok_url=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url' 2>/dev/null || echo "")
+
+        if [ -n "$ngrok_url" ]; then
+            echo -e "${GREEN}✓${NC} Public URL: $ngrok_url"
+            echo ""
+            echo "Share this URL with your team:"
+            echo "  orb config set-sync-path $ngrok_url"
+            echo ""
+        else
+            echo -e "${YELLOW}⚠${NC} Couldn't get ngrok URL automatically"
+            echo "  Check ngrok dashboard: http://localhost:4040"
+            echo ""
+        fi
+    fi
+
+    # Create Python server script
+    cat > "$server_dir/server.py" <<'PYEOF'
+#!/usr/bin/env python3
+import http.server
+import socketserver
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
+HOST = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
+DATA_DIR = Path.home() / ".orbiter" / "server" / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+class OrbiterHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_json({"status": "ok", "version": "0.1.0-barebones"})
+        elif self.path == "/namespaces":
+            namespaces = [d.name for d in DATA_DIR.iterdir() if d.is_dir()]
+            self.send_json({"namespaces": namespaces})
+        elif self.path.startswith("/namespace/"):
+            namespace = self.path.split("/")[-1]
+            ns_path = DATA_DIR / namespace
+            if ns_path.exists():
+                self.send_file_tree(ns_path, namespace)
+            else:
+                self.send_error(404, f"Namespace not found: {namespace}")
+        else:
+            self.send_error(404, "Not found")
+
+    def do_POST(self):
+        if self.path == "/push":
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            data = json.loads(post_data.decode('utf-8'))
+
+            namespace = data.get('namespace')
+            files = data.get('files', {})
+
+            if not namespace:
+                self.send_error(400, "Missing namespace")
+                return
+
+            ns_path = DATA_DIR / namespace
+            ns_path.mkdir(parents=True, exist_ok=True)
+
+            # Save files
+            for filepath, content in files.items():
+                full_path = ns_path / filepath
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                if isinstance(content, dict):
+                    full_path.write_text(json.dumps(content, indent=2))
+                else:
+                    full_path.write_text(content)
+
+            self.send_json({"status": "pushed", "namespace": namespace})
+        else:
+            self.send_error(404, "Not found")
+
+    def send_json(self, data):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
+    def send_file_tree(self, path, namespace):
+        files = {}
+        for root, dirs, filenames in os.walk(path):
+            for filename in filenames:
+                filepath = Path(root) / filename
+                rel_path = filepath.relative_to(path)
+                try:
+                    files[str(rel_path)] = filepath.read_text()
+                except:
+                    pass
+        self.send_json({"namespace": namespace, "files": files})
+
+    def log_message(self, format, *args):
+        sys.stderr.write(f"[{self.log_date_time_string()}] {format % args}\n")
+
+with socketserver.TCPServer((HOST, PORT), OrbiterHandler) as httpd:
+    print(f"Orbiter server running on {HOST}:{PORT}")
+    print(f"Data directory: {DATA_DIR}")
+    print("Press Ctrl+C to stop")
+    httpd.serve_forever()
+PYEOF
+
+    chmod +x "$server_dir/server.py"
+
+    # Trap Ctrl+C to cleanup
+    trap "cleanup_server $ngrok_pid" INT TERM
+
+    # Start server
+    echo -e "${GREEN}✓${NC} Server started!"
+    echo ""
+    echo "Press Ctrl+C to stop"
+    echo ""
+
+    python3 "$server_dir/server.py" "$port" "$host"
+}
+
+# Cleanup server on exit
+cleanup_server() {
+    local ngrok_pid="$1"
+    echo ""
+    echo -e "${BLUE}Stopping server...${NC}"
+
+    if [ -n "$ngrok_pid" ]; then
+        kill "$ngrok_pid" 2>/dev/null || true
+    fi
+
+    echo -e "${GREEN}✓${NC} Server stopped"
+    exit 0
+}
+
+# Main command handler
+main() {
+    init_config
+
+    if [ $# -eq 0 ]; then
+        cat <<EOF
+Orbiter v$VERSION - Barebones plan sync for Starry Night
+
+Usage:
+  orb config set-sync-path <path>  Set shared sync location (file or URL)
+  orb config add <namespace>       Add namespace to sync
+  orb config remove <namespace>    Remove namespace from sync
+  orb config list                  List configured namespaces
+
+  orb push                         Push plans to sync location
+  orb pull                         Pull plans from sync location
+  orb status                       Show current status
+
+  orb serve [--public] [--port N]  Start orbiter server
+    --public                       Expose via ngrok (requires ngrok)
+    --port N                       Port number (default: 3000)
+    --host HOST                    Host address (default: 127.0.0.1)
+
+  orb help                         Show this help message
+  orb version                      Show version
+
+Examples:
+  # File-based sync (Dropbox/Drive)
+  orb config set-sync-path ~/Dropbox/orbiter-sync
+  orb config add spoq-web-apis
+  orb push
+  orb pull
+
+  # Server-based sync
+  orb serve --public               # On server machine
+  orb config set-sync-path <URL>   # On client machines
+  orb push
+
+EOF
+        exit 0
+    fi
+
+    local command="$1"
+    shift
+
+    case "$command" in
+        config)
+            if [ $# -eq 0 ]; then
+                echo -e "${RED}✗${NC} Missing config command"
+                exit 1
+            fi
+
+            local subcommand="$1"
+            shift
+
+            case "$subcommand" in
+                set-sync-path)
+                    if [ $# -eq 0 ]; then
+                        echo -e "${RED}✗${NC} Missing path argument"
+                        exit 1
+                    fi
+                    local path="${1/#\~/$HOME}"
+                    set_config "syncPath" "$path"
+                    echo -e "${GREEN}✓${NC} Sync path set to: $path"
+                    ;;
+                add)
+                    if [ $# -eq 0 ]; then
+                        echo -e "${RED}✗${NC} Missing namespace argument"
+                        exit 1
+                    fi
+                    add_namespace "$1"
+                    ;;
+                remove)
+                    if [ $# -eq 0 ]; then
+                        echo -e "${RED}✗${NC} Missing namespace argument"
+                        exit 1
+                    fi
+                    remove_namespace "$1"
+                    ;;
+                list)
+                    list_namespaces
+                    ;;
+                *)
+                    echo -e "${RED}✗${NC} Unknown config command: $subcommand"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        push)
+            push_plans
+            ;;
+        pull)
+            pull_plans
+            ;;
+        serve)
+            serve_plans "$@"
+            ;;
+        status)
+            show_status
+            ;;
+        version)
+            echo "Orbiter v$VERSION"
+            ;;
+        help)
+            "$0"
+            ;;
+        *)
+            echo -e "${RED}✗${NC} Unknown command: $command"
+            echo "Run 'orb help' for usage information"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

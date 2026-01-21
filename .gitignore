@@ -1,0 +1,7 @@
+# Test directories
+test-sync/
+test-comms/
+
+# Temporary files
+*.tmp
+.DS_Store

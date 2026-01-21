@@ -26,8 +26,17 @@ orb serve --public
 
 **Everyone else connects:**
 ```bash
+# See what namespaces you have
+orb list
+
+# Connect to server
 orb config set-sync-path https://abc123.ngrok.io
+
+# Add namespaces to sync
 orb config add spoq-web-apis
+orb config add spoq-cli
+
+# Push and pull plans
 orb push
 orb pull
 ```
@@ -47,9 +56,11 @@ Each namespace (project) has its own isolated plan storage.
 ## Commands
 
 ```bash
+orb list                        # List all available namespaces
 orb serve --public              # Start server with public URL
 orb config set-sync-path <url>  # Connect to server
 orb config add <namespace>      # Add namespace to sync
+orb config list                 # List configured namespaces
 orb push                        # Push your plans
 orb pull                        # Pull team's plans
 orb status                      # Check sync status

@@ -88,6 +88,58 @@ list_namespaces() {
     jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "  (none)"
 }
 
+# List all available namespaces
+list_available_namespaces() {
+    echo -e "${BLUE}Available namespaces in $COMMS_BASE:${NC}"
+    echo ""
+
+    if [ ! -d "$COMMS_BASE" ]; then
+        echo -e "${YELLOW}⚠${NC} Directory not found: $COMMS_BASE"
+        return 1
+    fi
+
+    local configured_namespaces=$(jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "")
+    local found=0
+
+    for dir in "$COMMS_BASE"/*; do
+        if [ -d "$dir" ] && [ "$(basename "$dir")" != "." ] && [ "$(basename "$dir")" != ".." ]; then
+            local ns=$(basename "$dir")
+
+            # Skip hidden directories
+            [[ "$ns" == .* ]] && continue
+
+            found=1
+
+            # Check if already configured
+            local is_configured=""
+            if echo "$configured_namespaces" | grep -q "^$ns$"; then
+                is_configured="${GREEN}✓ configured${NC}"
+            fi
+
+            # Check if has plans
+            local plan_count=""
+            if [ -f "$dir/board.json" ]; then
+                local active_count=$(find "$dir/active" -type d -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')
+                local queued_count=$(find "$dir/queued" -type d -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')
+                plan_count="(${active_count} active, ${queued_count} queued)"
+            fi
+
+            echo -e "  $ns $plan_count ${is_configured}"
+        fi
+    done
+
+    if [ $found -eq 0 ]; then
+        echo "  (no namespaces found)"
+        echo ""
+        echo "Namespaces are project folders in $COMMS_BASE"
+        echo "Create plans with Nova/Pulsar to see them here."
+    fi
+
+    echo ""
+    echo -e "${BLUE}To sync a namespace:${NC}"
+    echo "  orb config add <namespace>"
+}
+
 # Push plans to sync location
 push_plans() {
     local sync_path=$(get_config "syncPath")
@@ -437,6 +489,28 @@ cleanup_server() {
     exit 0
 }
 
+# Update orb to latest version
+update_orb() {
+    echo -e "${BLUE}Updating Orb...${NC}"
+    echo ""
+
+    # Check if curl is available
+    if ! command -v curl &> /dev/null; then
+        echo -e "${RED}✗${NC} curl not found. Please install curl first."
+        exit 1
+    fi
+
+    # Download and run install script
+    echo "Downloading latest version from GitHub..."
+    curl -fsSL https://raw.githubusercontent.com/AWLSEN/orb/main/install.sh | bash
+
+    echo ""
+    echo -e "${GREEN}✓${NC} Update complete!"
+    echo ""
+    echo "New version:"
+    "$0" version
+}
+
 # Main command handler
 main() {
     init_config
@@ -446,13 +520,14 @@ main() {
 Orbiter v$VERSION - Barebones plan sync for Starry Night
 
 Usage:
-  orb config set-sync-path <path>  Set shared sync location (file or URL)
+  orb list                         List all available namespaces
+  orb config set-sync-path <url>   Set sync server URL
   orb config add <namespace>       Add namespace to sync
   orb config remove <namespace>    Remove namespace from sync
   orb config list                  List configured namespaces
 
-  orb push                         Push plans to sync location
-  orb pull                         Pull plans from sync location
+  orb push                         Push plans to sync server
+  orb pull                         Pull plans from sync server
   orb status                       Show current status
 
   orb serve [--public] [--port N]  Start orbiter server
@@ -460,20 +535,20 @@ Usage:
     --port N                       Port number (default: 3000)
     --host HOST                    Host address (default: 127.0.0.1)
 
+  orb --update                     Update orb to latest version
   orb help                         Show this help message
   orb version                      Show version
 
 Examples:
-  # File-based sync (Dropbox/Drive)
-  orb config set-sync-path ~/Dropbox/orbiter-sync
-  orb config add spoq-web-apis
-  orb push
-  orb pull
+  # Start server
+  orb serve --public               # Get public URL
 
-  # Server-based sync
-  orb serve --public               # On server machine
-  orb config set-sync-path <URL>   # On client machines
-  orb push
+  # Connect and sync
+  orb list                         # See available namespaces
+  orb config set-sync-path <URL>   # Connect to server
+  orb config add spoq-web-apis     # Add namespace to sync
+  orb push                         # Push plans
+  orb pull                         # Pull plans
 
 EOF
         exit 0
@@ -525,6 +600,9 @@ EOF
                     ;;
             esac
             ;;
+        list)
+            list_available_namespaces
+            ;;
         push)
             push_plans
             ;;
@@ -539,6 +617,9 @@ EOF
             ;;
         version)
             echo "Orbiter v$VERSION"
+            ;;
+        --update)
+            update_orb
             ;;
         help)
             "$0"

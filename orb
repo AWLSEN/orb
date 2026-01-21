@@ -536,8 +536,8 @@ Usage:
     --host HOST                    Host address (default: 127.0.0.1)
 
   orb --update                     Update orb to latest version
+  orb --version                    Show version
   orb help                         Show this help message
-  orb version                      Show version
 
 Examples:
   # Start server
@@ -615,7 +615,7 @@ EOF
         status)
             show_status
             ;;
-        version)
+        version|--version)
             echo "Orbiter v$VERSION"
             ;;
         --update)

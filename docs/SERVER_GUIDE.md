@@ -1,18 +1,8 @@
-# Orbiter Server Mode Guide
+# Orb Server Mode Guide
 
-## Two Ways to Sync
+## How Orb Syncing Works
 
-### 1. File-Based (Current - v0.1)
-Use a shared folder everyone can access.
-
-```bash
-orb config set-sync-path ~/Dropbox/orbiter-sync
-orb push
-orb pull
-```
-
-### 2. Server-Based (NEW!)
-One person runs a server, everyone connects to it.
+Orb uses HTTP-based server sync. One person runs a server, everyone else connects to it.
 
 ## Server Mode Usage
 
@@ -23,7 +13,7 @@ One person runs a server, everyone connects to it.
 orb serve --public
 
 # Output:
-# Starting Orbiter Server
+# Starting Orb Server
 #   Port: 3000
 #   Host: 127.0.0.1
 #
@@ -77,19 +67,12 @@ orb serve --host 0.0.0.0
 # Accessible on local network at: http://192.168.x.x:3000
 ```
 
-## When to Use Each Mode
+## Why Server Mode?
 
-### Use File-Based When:
-- ✅ Team already uses Dropbox/Google Drive
-- ✅ Small team (2-3 people)
-- ✅ Don't want to run a server
-- ✅ Don't need real-time sync
-
-### Use Server-Based When:
-- ✅ Team is remote (different networks)
-- ✅ Don't have shared folder access
-- ✅ Want centralized plan storage
-- ✅ Larger team (4+ people)
+- ✅ Works for remote teams (different networks)
+- ✅ Centralized plan storage
+- ✅ Server host sees all plans in Nova/Pulsar
+- ✅ Simple HTTP-based sync
 
 ## ngrok Setup
 
@@ -196,18 +179,20 @@ orb config set-sync-path http://your-vps.com:3000
 
 ## Server Data Location
 
-Plans are stored on the server at:
+When you run the server, team plans sync directly to your local `~/comms/plans/` directory:
 ```
-~/.orbiter/server/data/
+~/comms/plans/
 ├── spoq-web-apis/
-│   ├── board.json
+│   ├── board.json (filtered to active/queued)
 │   ├── active/
 │   └── queued/
 └── spoq-cli/
-    ├── board.json
+    ├── board.json (filtered to active/queued)
     ├── active/
     └── queued/
 ```
+
+This means as server host, you can see all team plans in Nova/Pulsar!
 
 ## Stopping the Server
 
@@ -254,22 +239,18 @@ ngrok config add-authtoken <token>
 http://localhost:4040
 ```
 
-## Switching Between Modes
+## Switching Servers
 
-You can switch between file-based and server-based anytime:
+You can switch between different servers anytime:
 
 ```bash
-# Currently using file-based
-orb config set-sync-path ~/Dropbox/orbiter-sync
-orb push
-
-# Switch to server-based
+# Connect to dev server
 orb config set-sync-path https://abc123.ngrok.io
 orb push
 
-# Switch back to file-based
-orb config set-sync-path ~/Dropbox/orbiter-sync
-orb pull
+# Switch to production server
+orb config set-sync-path https://xyz456.ngrok.io
+orb push
 ```
 
 ## Security Notes
@@ -294,4 +275,4 @@ orb pull
 - Both push/pull plans
 - See them sync instantly!
 
-Later, we'll build "Orbiter Cloud" (hosted service) so you don't need to run your own server.
+Later, we'll build "Orb Cloud" (hosted service) so you don't need to run your own server.

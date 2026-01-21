@@ -96,7 +96,7 @@ orb config add <namespace>
 **Want to start fresh?**
 ```bash
 # Remove config
-rm -rf ~/.orbiter
+rm -rf ~/.orb
 
 # Run orb again to reinitialize
 orb status

@@ -218,7 +218,7 @@ orbiter/
 ├── DEMO.md           # This file
 └── .gitignore        # Git ignore
 
-~/.orbiter/
+~/.orb/
 ├── config.json       # User config
 └── bin/
     └── orb          # Installed binary

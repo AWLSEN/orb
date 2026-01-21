@@ -180,7 +180,7 @@ Everything from the PDF spec
 
 - **Language**: Bash (390 lines)
 - **Dependencies**: `jq`, `rsync`
-- **Config**: JSON (`~/.orbiter/config.json`)
+- **Config**: JSON (`~/.orb/config.json`)
 - **Installation**: `~/.local/bin/orb`
 
 ## Success Metrics

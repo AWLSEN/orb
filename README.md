@@ -67,8 +67,8 @@ orb config add <namespace>      # Add namespace to sync
 orb config remove <namespace>   # Remove namespace (stop syncing, keep files)
 orb config list                 # List configured namespaces
 orb delete <namespace>          # Delete namespace completely (removes files!)
-orb push                        # Push your plans
-orb pull                        # Pull team's plans
+orb push [namespace]            # Push your plans (all or specific)
+orb pull [namespace]            # Pull team's plans (all or specific)
 orb status                      # Check sync status
 ```
 
@@ -83,6 +83,8 @@ Public URL shared   →    with team      →       sync plans
 ```
 
 One person runs `orb serve --public`, shares the URL, everyone syncs.
+
+**Server host sees all plans:** When running the server, team plans sync directly to your `~/comms/plans/` directory, visible in Nova/Pulsar.
 
 ## Requirements
 
@@ -122,12 +124,25 @@ orb config add spoq-cli         # And this
 # Don't add other namespaces    # They won't sync
 ```
 
+### Individual Namespace Sync
+```bash
+# Push/pull specific namespaces
+orb push spoq-web-apis          # Just push this project
+orb pull spoq-cli               # Just pull this project
+
+# Or sync all configured namespaces
+orb push                        # Push everything
+orb pull                        # Pull everything
+```
+
 ## Current Version
 
 **v0.1.0-barebones**
-- Manual push/pull (no auto-sync)
-- Server-based sync with ngrok
+- HTTP-based push/pull with server sync
+- Individual or bulk namespace operations
 - Namespace filtering
+- Server syncs to `~/comms/plans/` (visible in Nova/Pulsar)
+- Handles both array and object `board.json` formats
 - Simple conflict resolution (newest wins)
 
 ## Roadmap

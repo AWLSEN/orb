@@ -1,15 +1,23 @@
 #!/bin/bash
-# Install orbiter and all dependencies
+# Install orb and all dependencies
 
-set -euo pipefail
+set -eo pipefail
 
 INSTALL_DIR="$HOME/.local/bin"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_DIR")" 2>/dev/null && pwd || echo "")"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
+
+# Detect if running via curl (no local files) or locally
+if [ -f "$SCRIPT_DIR/bin/orb" ]; then
+    INSTALL_MODE="local"
+else
+    INSTALL_MODE="remote"
+fi
 
 echo -e "${BLUE}Installing Orb v0.1.0-barebones${NC}"
 echo ""
@@ -130,9 +138,22 @@ echo -e "${BLUE}Installing orb...${NC}"
 # Create install directory if it doesn't exist
 mkdir -p "$INSTALL_DIR"
 
-# Copy orb to install directory
-cp "$SCRIPT_DIR/bin/orb" "$INSTALL_DIR/orb"
-chmod +x "$INSTALL_DIR/orb"
+# Install orb based on mode
+if [ "$INSTALL_MODE" = "local" ]; then
+    # Local install: copy from bin/
+    cp "$SCRIPT_DIR/bin/orb" "$INSTALL_DIR/orb"
+    chmod +x "$INSTALL_DIR/orb"
+else
+    # Remote install: download from GitHub
+    echo "Downloading orb from GitHub..."
+    if command -v curl &> /dev/null; then
+        curl -fsSL https://raw.githubusercontent.com/AWLSEN/orb/main/bin/orb -o "$INSTALL_DIR/orb"
+        chmod +x "$INSTALL_DIR/orb"
+    else
+        echo -e "${RED}✗${NC} curl not found. Please install curl first."
+        exit 1
+    fi
+fi
 
 echo -e "${GREEN}✓${NC} Installed orb to $INSTALL_DIR/orb"
 

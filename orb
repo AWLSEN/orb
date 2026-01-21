@@ -1,10 +1,11 @@
 #!/bin/bash
-# Orbiter - Barebones plan sync for Starry Night
+# Orb - Barebones plan sync for Starry Night
 # Usage: orb <command> [args]
 
 set -euo pipefail
 
 VERSION="0.1.0-barebones"
+BUILD_DATE="2026-01-21"
 COMMS_BASE="$HOME/comms/plans"
 CONFIG_DIR="$HOME/.orbiter"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -276,7 +277,7 @@ pull_plans() {
 show_status() {
     local sync_path=$(get_config "syncPath")
 
-    echo -e "${BLUE}Orbiter Status${NC}"
+    echo -e "${BLUE}Orb Status${NC}"
     echo "  Version: $VERSION"
     echo "  Sync path: ${sync_path:-"(not configured)"}"
     echo ""
@@ -300,7 +301,7 @@ show_status() {
     fi
 }
 
-# Start orbiter server
+# Start orb server
 serve_plans() {
     local port=3000
     local public=false
@@ -332,7 +333,7 @@ serve_plans() {
     local server_dir="$CONFIG_DIR/server"
     mkdir -p "$server_dir"
 
-    echo -e "${BLUE}Starting Orbiter Server${NC}"
+    echo -e "${BLUE}Starting Orb Server${NC}"
     echo "  Port: $port"
     echo "  Host: $host"
     echo ""
@@ -455,7 +456,7 @@ class OrbiterHandler(http.server.SimpleHTTPRequestHandler):
         sys.stderr.write(f"[{self.log_date_time_string()}] {format % args}\n")
 
 with socketserver.TCPServer((HOST, PORT), OrbiterHandler) as httpd:
-    print(f"Orbiter server running on {HOST}:{PORT}")
+    print(f"Orb server running on {HOST}:{PORT}")
     print(f"Data directory: {DATA_DIR}")
     print("Press Ctrl+C to stop")
     httpd.serve_forever()
@@ -517,7 +518,7 @@ main() {
 
     if [ $# -eq 0 ]; then
         cat <<EOF
-Orbiter v$VERSION - Barebones plan sync for Starry Night
+Orb v$VERSION - Barebones plan sync for Starry Night
 
 Usage:
   orb list                         List all available namespaces
@@ -530,7 +531,7 @@ Usage:
   orb pull                         Pull plans from sync server
   orb status                       Show current status
 
-  orb serve [--public] [--port N]  Start orbiter server
+  orb serve [--public] [--port N]  Start orb server
     --public                       Expose via ngrok (requires ngrok)
     --port N                       Port number (default: 3000)
     --host HOST                    Host address (default: 127.0.0.1)
@@ -616,7 +617,9 @@ EOF
             show_status
             ;;
         version|--version)
-            echo "Orbiter v$VERSION"
+            echo "Orb v$VERSION"
+            echo "Built: $BUILD_DATE"
+            echo "GitHub: https://github.com/AWLSEN/orb"
             ;;
         --update)
             update_orb

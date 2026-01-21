@@ -11,7 +11,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${BLUE}Installing Orbiter v0.1.0-barebones${NC}"
+echo -e "${BLUE}Installing Orb v0.1.0-barebones${NC}"
 echo ""
 
 # Detect OS and package manager
@@ -125,7 +125,7 @@ else
 fi
 
 echo ""
-echo -e "${BLUE}Installing orbiter...${NC}"
+echo -e "${BLUE}Installing orb...${NC}"
 
 # Create install directory if it doesn't exist
 mkdir -p "$INSTALL_DIR"
@@ -134,7 +134,7 @@ mkdir -p "$INSTALL_DIR"
 cp "$SCRIPT_DIR/orb" "$INSTALL_DIR/orb"
 chmod +x "$INSTALL_DIR/orb"
 
-echo -e "${GREEN}✓${NC} Installed orbiter to $INSTALL_DIR/orb"
+echo -e "${GREEN}✓${NC} Installed orb to $INSTALL_DIR/orb"
 
 # Check if directory is in PATH
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then

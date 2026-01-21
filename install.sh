@@ -131,7 +131,7 @@ echo -e "${BLUE}Installing orb...${NC}"
 mkdir -p "$INSTALL_DIR"
 
 # Copy orb to install directory
-cp "$SCRIPT_DIR/orb" "$INSTALL_DIR/orb"
+cp "$SCRIPT_DIR/bin/orb" "$INSTALL_DIR/orb"
 chmod +x "$INSTALL_DIR/orb"
 
 echo -e "${GREEN}✓${NC} Installed orb to $INSTALL_DIR/orb"

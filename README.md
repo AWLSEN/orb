@@ -88,11 +88,11 @@ Auto-installed by `install.sh`:
 
 ## Documentation
 
-- **[START_HERE.md](START_HERE.md)** - Begin here (2 min)
-- **[QUICKSTART.md](QUICKSTART.md)** - Setup guide
-- **[SERVER_GUIDE.md](SERVER_GUIDE.md)** - Server mode details
-- **[EXAMPLE.md](EXAMPLE.md)** - Real scenarios
-- **[ROADMAP.md](ROADMAP.md)** - Future plans
+- **[START_HERE.md](docs/START_HERE.md)** - Begin here (2 min)
+- **[QUICKSTART.md](docs/QUICKSTART.md)** - Setup guide
+- **[SERVER_GUIDE.md](docs/SERVER_GUIDE.md)** - Server mode details
+- **[EXAMPLE.md](docs/EXAMPLE.md)** - Real scenarios
+- **[ROADMAP.md](docs/ROADMAP.md)** - Future plans
 
 ## Examples
 

@@ -7,7 +7,7 @@ set -euo pipefail
 VERSION="0.1.0-barebones"
 BUILD_DATE="2026-01-21"
 COMMS_BASE="$HOME/comms/plans"
-CONFIG_DIR="$HOME/.orbiter"
+CONFIG_DIR="$HOME/.orb"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
 # Colors for output
@@ -19,6 +19,12 @@ NC='\033[0m' # No Color
 
 # Initialize config if it doesn't exist
 init_config() {
+    # Migrate from old .orbiter to new .orb
+    if [ -d "$HOME/.orbiter" ] && [ ! -d "$CONFIG_DIR" ]; then
+        mv "$HOME/.orbiter" "$CONFIG_DIR"
+        echo -e "${GREEN}✓${NC} Migrated config from ~/.orbiter to ~/.orb"
+    fi
+
     if [ ! -f "$CONFIG_FILE" ]; then
         mkdir -p "$CONFIG_DIR"
         cat > "$CONFIG_FILE" <<EOF
@@ -28,7 +34,7 @@ init_config() {
   "namespaces": []
 }
 EOF
-        echo -e "${GREEN}✓${NC} Initialized orbiter config at $CONFIG_FILE"
+        echo -e "${GREEN}✓${NC} Initialized orb config at $CONFIG_FILE"
     fi
 }
 
@@ -122,6 +128,129 @@ list_namespaces() {
     jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "  (none)"
 }
 
+# Check if path is a URL
+is_url() {
+    local path="$1"
+    [[ "$path" =~ ^https?:// ]]
+}
+
+# Push via HTTP
+push_http() {
+    local url="$1"
+    local namespace="$2"
+
+    if [ ! -d "$COMMS_BASE/$namespace" ]; then
+        echo -e "${RED}✗${NC} Namespace not found: $namespace"
+        return 1
+    fi
+
+    echo -e "  ${namespace}"
+
+    local tmp_dir=$(mktemp -d)
+    local tmp_json=$(mktemp)
+
+    # Copy namespace to temp dir with filtering
+    mkdir -p "$tmp_dir/$namespace"
+
+    # Copy filtered board.json
+    if [ -f "$COMMS_BASE/$namespace/board.json" ]; then
+        local board_type=$(jq -r 'type' "$COMMS_BASE/$namespace/board.json")
+        if [ "$board_type" = "array" ]; then
+            jq '[.[] | select(.status == "active" or .status == "queued")]' \
+                "$COMMS_BASE/$namespace/board.json" > "$tmp_dir/$namespace/board.json"
+        else
+            jq '{
+                project: .project,
+                plans: [.plans[] | select(.status == "active" or .status == "queued")]
+            }' "$COMMS_BASE/$namespace/board.json" > "$tmp_dir/$namespace/board.json"
+        fi
+    fi
+
+    # Copy active and queued directories
+    if [ -d "$COMMS_BASE/$namespace/active" ]; then
+        rsync -a "$COMMS_BASE/$namespace/active/" "$tmp_dir/$namespace/active/"
+    fi
+    if [ -d "$COMMS_BASE/$namespace/queued" ]; then
+        rsync -a "$COMMS_BASE/$namespace/queued/" "$tmp_dir/$namespace/queued/"
+    fi
+
+    # Build files JSON using Python (more reliable than bash subshells)
+    python3 <<PYEOF > "$tmp_json"
+import json
+import os
+from pathlib import Path
+
+files = {}
+base_dir = Path("$tmp_dir/$namespace")
+
+for file_path in base_dir.rglob("*"):
+    if file_path.is_file():
+        rel_path = str(file_path.relative_to(base_dir))
+        try:
+            with open(file_path, 'r') as f:
+                files[rel_path] = f.read()
+        except:
+            pass  # Skip files that can't be read
+
+payload = {
+    "namespace": "$namespace",
+    "files": files
+}
+
+print(json.dumps(payload))
+PYEOF
+
+    # POST to server
+    if ! curl -sf -X POST "$url/push" \
+        -H "Content-Type: application/json" \
+        -d @"$tmp_json" > /dev/null 2>&1; then
+        echo -e "${RED}✗${NC} Failed to push $namespace"
+        rm -rf "$tmp_dir" "$tmp_json"
+        return 1
+    fi
+
+    rm -rf "$tmp_dir" "$tmp_json"
+    return 0
+}
+
+# Pull via HTTP
+pull_http() {
+    local url="$1"
+    local namespace="$2"
+
+    echo -e "  ${namespace}"
+
+    # GET from server
+    local response=$(mktemp)
+    if ! curl -sf "$url/namespace/$namespace" -o "$response"; then
+        echo -e "${RED}✗${NC} Failed to pull $namespace"
+        rm -f "$response"
+        return 1
+    fi
+
+    # Extract files and save
+    mkdir -p "$COMMS_BASE/$namespace"
+
+    # Get file list
+    local files=$(jq -r '.files | keys[]' "$response" 2>/dev/null || echo "")
+
+    if [ -z "$files" ]; then
+        rm -f "$response"
+        return 0
+    fi
+
+    echo "$files" | while read -r filepath; do
+        local full_path="$COMMS_BASE/$namespace/$filepath"
+        mkdir -p "$(dirname "$full_path")"
+
+        # Extract file content
+        jq -r ".files[\"$filepath\"]" "$response" > "$full_path"
+    done
+
+    rm -f "$response"
+    return 0
+}
+
 # List all available namespaces
 list_available_namespaces() {
     echo -e "${BLUE}Available namespaces in $COMMS_BASE:${NC}"
@@ -176,6 +305,7 @@ list_available_namespaces() {
 
 # Push plans to sync location
 push_plans() {
+    local target_namespace="$1"  # Optional: push specific namespace
     local sync_path=$(get_config "syncPath")
 
     if [ -z "$sync_path" ]; then
@@ -183,61 +313,111 @@ push_plans() {
         exit 1
     fi
 
-    if [ ! -d "$sync_path" ]; then
-        mkdir -p "$sync_path"
-        echo -e "${GREEN}✓${NC} Created sync directory: $sync_path"
+    # Determine namespaces to push
+    local namespaces=""
+    if [ -n "$target_namespace" ]; then
+        # Push specific namespace (must be configured)
+        local configured=$(jq -r --arg ns "$target_namespace" '.namespaces[] | select(. == $ns)' "$CONFIG_FILE" 2>/dev/null || echo "")
+        if [ -z "$configured" ]; then
+            echo -e "${RED}✗${NC} Namespace '$target_namespace' not configured. Run: orb config add $target_namespace"
+            exit 1
+        fi
+        namespaces="$target_namespace"
+    else
+        # Push all configured namespaces
+        namespaces=$(jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "")
+        if [ -z "$namespaces" ]; then
+            echo -e "${YELLOW}⚠${NC} No namespaces configured. Run: orb config add <namespace>"
+            exit 1
+        fi
     fi
 
-    local namespaces=$(jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "")
+    # Check if sync_path is URL or file path
+    if is_url "$sync_path"; then
+        # HTTP-based push
+        echo -e "${BLUE}Pushing plans to server...${NC}"
 
-    if [ -z "$namespaces" ]; then
-        echo -e "${YELLOW}⚠${NC} No namespaces configured. Run: orb config add <namespace>"
-        exit 1
+        local pushed_count=0
+        local failed_count=0
+        while IFS= read -r namespace; do
+            if [ ! -d "$COMMS_BASE/$namespace" ]; then
+                echo -e "${YELLOW}⚠${NC} Skipping missing namespace: $namespace"
+                continue
+            fi
+
+            if push_http "$sync_path" "$namespace"; then
+                pushed_count=$((pushed_count + 1))
+            else
+                failed_count=$((failed_count + 1))
+            fi
+        done <<< "$namespaces"
+
+        if [ $failed_count -gt 0 ]; then
+            echo -e "${YELLOW}⚠${NC} Pushed $pushed_count namespace(s), $failed_count failed"
+        else
+            echo -e "${GREEN}✓${NC} Pushed $pushed_count namespace(s)"
+        fi
+    else
+        # File-based push
+        if [ ! -d "$sync_path" ]; then
+            mkdir -p "$sync_path"
+            echo -e "${GREEN}✓${NC} Created sync directory: $sync_path"
+        fi
+
+        echo -e "${BLUE}Pushing plans...${NC}"
+
+        local pushed_count=0
+        while IFS= read -r namespace; do
+            if [ ! -d "$COMMS_BASE/$namespace" ]; then
+                echo -e "${YELLOW}⚠${NC} Skipping missing namespace: $namespace"
+                continue
+            fi
+
+            echo -e "  ${namespace}"
+
+            # Create namespace directory in sync location
+            mkdir -p "$sync_path/$namespace"
+
+            # Copy board.json (filter to only active and queued plans)
+            if [ -f "$COMMS_BASE/$namespace/board.json" ]; then
+                # Handle both array and object formats
+                local board_type=$(jq -r 'type' "$COMMS_BASE/$namespace/board.json")
+                if [ "$board_type" = "array" ]; then
+                    # Array format: filter plans directly
+                    jq '[.[] | select(.status == "active" or .status == "queued")]' \
+                        "$COMMS_BASE/$namespace/board.json" > "$sync_path/$namespace/board.json"
+                else
+                    # Object format: filter plans within object
+                    jq '{
+                        project: .project,
+                        plans: [.plans[] | select(.status == "active" or .status == "queued")]
+                    }' "$COMMS_BASE/$namespace/board.json" > "$sync_path/$namespace/board.json"
+                fi
+            fi
+
+            # Copy active plans
+            if [ -d "$COMMS_BASE/$namespace/active" ]; then
+                rsync -a --delete "$COMMS_BASE/$namespace/active/" "$sync_path/$namespace/active/"
+            fi
+
+            # Copy queued plans
+            if [ -d "$COMMS_BASE/$namespace/queued" ]; then
+                rsync -a --delete "$COMMS_BASE/$namespace/queued/" "$sync_path/$namespace/queued/"
+            fi
+
+            # Add timestamp
+            echo "{\"lastPush\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\", \"pushedBy\": \"$(whoami)@$(hostname)\"}" > "$sync_path/$namespace/.meta.json"
+
+            pushed_count=$((pushed_count + 1))
+        done <<< "$namespaces"
+
+        echo -e "${GREEN}✓${NC} Pushed $pushed_count namespace(s)"
     fi
-
-    echo -e "${BLUE}Pushing plans...${NC}"
-
-    local pushed_count=0
-    while IFS= read -r namespace; do
-        if [ ! -d "$COMMS_BASE/$namespace" ]; then
-            echo -e "${YELLOW}⚠${NC} Skipping missing namespace: $namespace"
-            continue
-        fi
-
-        echo -e "  ${namespace}"
-
-        # Create namespace directory in sync location
-        mkdir -p "$sync_path/$namespace"
-
-        # Copy board.json (filter to only active and queued plans)
-        if [ -f "$COMMS_BASE/$namespace/board.json" ]; then
-            jq '{
-                project: .project,
-                plans: [.plans[] | select(.status == "active" or .status == "queued")]
-            }' "$COMMS_BASE/$namespace/board.json" > "$sync_path/$namespace/board.json"
-        fi
-
-        # Copy active plans
-        if [ -d "$COMMS_BASE/$namespace/active" ]; then
-            rsync -a --delete "$COMMS_BASE/$namespace/active/" "$sync_path/$namespace/active/"
-        fi
-
-        # Copy queued plans
-        if [ -d "$COMMS_BASE/$namespace/queued" ]; then
-            rsync -a --delete "$COMMS_BASE/$namespace/queued/" "$sync_path/$namespace/queued/"
-        fi
-
-        # Add timestamp
-        echo "{\"lastPush\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\", \"pushedBy\": \"$(whoami)@$(hostname)\"}" > "$sync_path/$namespace/.meta.json"
-
-        pushed_count=$((pushed_count + 1))
-    done <<< "$namespaces"
-
-    echo -e "${GREEN}✓${NC} Pushed $pushed_count namespace(s)"
 }
 
 # Pull plans from sync location
 pull_plans() {
+    local target_namespace="$1"  # Optional: pull specific namespace
     local sync_path=$(get_config "syncPath")
 
     if [ -z "$sync_path" ]; then
@@ -245,75 +425,110 @@ pull_plans() {
         exit 1
     fi
 
-    if [ ! -d "$sync_path" ]; then
-        echo -e "${RED}✗${NC} Sync directory not found: $sync_path"
-        exit 1
-    fi
-
-    local namespaces=$(jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "")
-
-    if [ -z "$namespaces" ]; then
-        echo -e "${YELLOW}⚠${NC} No namespaces configured. Run: orb config add <namespace>"
-        exit 1
-    fi
-
-    echo -e "${BLUE}Pulling plans...${NC}"
-
-    local pulled_count=0
-    while IFS= read -r namespace; do
-        if [ ! -d "$sync_path/$namespace" ]; then
-            echo -e "${YELLOW}⚠${NC} Skipping missing remote namespace: $namespace"
-            continue
+    # Determine namespaces to pull
+    local namespaces=""
+    if [ -n "$target_namespace" ]; then
+        # Pull specific namespace (must be configured)
+        local configured=$(jq -r --arg ns "$target_namespace" '.namespaces[] | select(. == $ns)' "$CONFIG_FILE" 2>/dev/null || echo "")
+        if [ -z "$configured" ]; then
+            echo -e "${RED}✗${NC} Namespace '$target_namespace' not configured. Run: orb config add $target_namespace"
+            exit 1
         fi
+        namespaces="$target_namespace"
+    else
+        # Pull all configured namespaces
+        namespaces=$(jq -r '.namespaces[]' "$CONFIG_FILE" 2>/dev/null || echo "")
+        if [ -z "$namespaces" ]; then
+            echo -e "${YELLOW}⚠${NC} No namespaces configured. Run: orb config add <namespace>"
+            exit 1
+        fi
+    fi
 
-        echo -e "  ${namespace}"
+    # Check if sync_path is URL or file path
+    if is_url "$sync_path"; then
+        # HTTP-based pull
+        echo -e "${BLUE}Pulling plans from server...${NC}"
 
-        # Create local namespace directory if it doesn't exist
-        mkdir -p "$COMMS_BASE/$namespace"
-
-        # Merge board.json (keep local archived, merge remote active/queued)
-        if [ -f "$sync_path/$namespace/board.json" ]; then
-            if [ -f "$COMMS_BASE/$namespace/board.json" ]; then
-                # Smart merge:
-                # 1. Keep all local archived/review plans
-                # 2. Merge remote active/queued plans (newest wins)
-                local tmp_file=$(mktemp)
-                jq -s '
-                    .[0] as $local | .[1] as $remote |
-                    {
-                        project: ($local.project // $remote.project),
-                        plans: (
-                            # Local archived/review plans (not synced)
-                            [$local.plans[] | select(.status == "archived" or .status == "review")] +
-                            # Merge active/queued: combine local and remote, dedupe by id, keep newest
-                            ([$local.plans[] | select(.status == "active" or .status == "queued"), $remote.plans[]] |
-                             group_by(.id) |
-                             map(max_by(.createdAt // "1970-01-01T00:00:00Z")))
-                        )
-                    }
-                ' "$COMMS_BASE/$namespace/board.json" "$sync_path/$namespace/board.json" > "$tmp_file"
-                mv "$tmp_file" "$COMMS_BASE/$namespace/board.json"
+        local pulled_count=0
+        local failed_count=0
+        while IFS= read -r namespace; do
+            if pull_http "$sync_path" "$namespace"; then
+                pulled_count=$((pulled_count + 1))
             else
-                cp "$sync_path/$namespace/board.json" "$COMMS_BASE/$namespace/board.json"
+                failed_count=$((failed_count + 1))
             fi
+        done <<< "$namespaces"
+
+        if [ $failed_count -gt 0 ]; then
+            echo -e "${YELLOW}⚠${NC} Pulled $pulled_count namespace(s), $failed_count failed"
+        else
+            echo -e "${GREEN}✓${NC} Pulled $pulled_count namespace(s)"
+        fi
+    else
+        # File-based pull
+        if [ ! -d "$sync_path" ]; then
+            echo -e "${RED}✗${NC} Sync directory not found: $sync_path"
+            exit 1
         fi
 
-        # Sync active plans (newest wins)
-        if [ -d "$sync_path/$namespace/active" ]; then
-            mkdir -p "$COMMS_BASE/$namespace/active"
-            rsync -a -u "$sync_path/$namespace/active/" "$COMMS_BASE/$namespace/active/"
-        fi
+        echo -e "${BLUE}Pulling plans...${NC}"
 
-        # Sync queued plans (newest wins)
-        if [ -d "$sync_path/$namespace/queued" ]; then
-            mkdir -p "$COMMS_BASE/$namespace/queued"
-            rsync -a -u "$sync_path/$namespace/queued/" "$COMMS_BASE/$namespace/queued/"
-        fi
+        local pulled_count=0
+        while IFS= read -r namespace; do
+            if [ ! -d "$sync_path/$namespace" ]; then
+                echo -e "${YELLOW}⚠${NC} Skipping missing remote namespace: $namespace"
+                continue
+            fi
 
-        pulled_count=$((pulled_count + 1))
-    done <<< "$namespaces"
+            echo -e "  ${namespace}"
 
-    echo -e "${GREEN}✓${NC} Pulled $pulled_count namespace(s)"
+            # Create local namespace directory if it doesn't exist
+            mkdir -p "$COMMS_BASE/$namespace"
+
+            # Merge board.json (keep local archived, merge remote active/queued)
+            if [ -f "$sync_path/$namespace/board.json" ]; then
+                if [ -f "$COMMS_BASE/$namespace/board.json" ]; then
+                    # Smart merge:
+                    # 1. Keep all local archived/review plans
+                    # 2. Merge remote active/queued plans (newest wins)
+                    local tmp_file=$(mktemp)
+                    jq -s '
+                        .[0] as $local | .[1] as $remote |
+                        {
+                            project: ($local.project // $remote.project),
+                            plans: (
+                                # Local archived/review plans (not synced)
+                                [$local.plans[] | select(.status == "archived" or .status == "review")] +
+                                # Merge active/queued: combine local and remote, dedupe by id, keep newest
+                                ([$local.plans[] | select(.status == "active" or .status == "queued"), $remote.plans[]] |
+                                 group_by(.id) |
+                                 map(max_by(.createdAt // "1970-01-01T00:00:00Z")))
+                            )
+                        }
+                    ' "$COMMS_BASE/$namespace/board.json" "$sync_path/$namespace/board.json" > "$tmp_file"
+                    mv "$tmp_file" "$COMMS_BASE/$namespace/board.json"
+                else
+                    cp "$sync_path/$namespace/board.json" "$COMMS_BASE/$namespace/board.json"
+                fi
+            fi
+
+            # Sync active plans (newest wins)
+            if [ -d "$sync_path/$namespace/active" ]; then
+                mkdir -p "$COMMS_BASE/$namespace/active"
+                rsync -a -u "$sync_path/$namespace/active/" "$COMMS_BASE/$namespace/active/"
+            fi
+
+            # Sync queued plans (newest wins)
+            if [ -d "$sync_path/$namespace/queued" ]; then
+                mkdir -p "$COMMS_BASE/$namespace/queued"
+                rsync -a -u "$sync_path/$namespace/queued/" "$COMMS_BASE/$namespace/queued/"
+            fi
+
+            pulled_count=$((pulled_count + 1))
+        done <<< "$namespaces"
+
+        echo -e "${GREEN}✓${NC} Pulled $pulled_count namespace(s)"
+    fi
 }
 
 # Show status
@@ -427,7 +642,7 @@ from urllib.parse import parse_qs, urlparse
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
 HOST = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
-DATA_DIR = Path.home() / ".orbiter" / "server" / "data"
+DATA_DIR = Path.home() / "comms" / "plans"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 class OrbiterHandler(http.server.SimpleHTTPRequestHandler):
@@ -572,8 +787,8 @@ Usage:
 
   orb delete <namespace>           Delete namespace completely (removes files!)
 
-  orb push                         Push plans to sync server
-  orb pull                         Pull plans from sync server
+  orb push [namespace]             Push plans to sync server (all or specific)
+  orb pull [namespace]             Pull plans from sync server (all or specific)
   orb status                       Show current status
 
   orb serve [--public] [--port N]  Start orb server
@@ -593,8 +808,10 @@ Examples:
   orb list                         # See available namespaces
   orb config set-sync-path <URL>   # Connect to server
   orb config add spoq-web-apis     # Add namespace to sync
-  orb push                         # Push plans
-  orb pull                         # Pull plans
+  orb push                         # Push all configured namespaces
+  orb push spoq-web-apis           # Push specific namespace
+  orb pull                         # Pull all configured namespaces
+  orb pull spoq-cli                # Pull specific namespace
 
 EOF
         exit 0
@@ -658,10 +875,10 @@ EOF
             list_available_namespaces
             ;;
         push)
-            push_plans
+            push_plans "${1:-}"
             ;;
         pull)
-            pull_plans
+            pull_plans "${1:-}"
             ;;
         serve)
             serve_plans "$@"

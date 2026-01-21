@@ -47,9 +47,13 @@ Done! Your plans are synced.
 
 Syncs Nova/Pulsar plans from `~/comms/plans/` across team members:
 
-- ✅ `board.json` - Plan metadata
+- ✅ `board.json` - Plan metadata (filtered to active/queued only)
 - ✅ `active/` - Active plans
 - ✅ `queued/` - Queued plans
+
+**What's NOT synced:**
+- ❌ `archived/` - Completed plans (stay local)
+- ❌ `review/` - Review plans (stay local)
 
 Each namespace (project) has its own isolated plan storage.
 
@@ -60,7 +64,9 @@ orb list                        # List all available namespaces
 orb serve --public              # Start server with public URL
 orb config set-sync-path <url>  # Connect to server
 orb config add <namespace>      # Add namespace to sync
+orb config remove <namespace>   # Remove namespace (stop syncing, keep files)
 orb config list                 # List configured namespaces
+orb delete <namespace>          # Delete namespace completely (removes files!)
 orb push                        # Push your plans
 orb pull                        # Pull team's plans
 orb status                      # Check sync status

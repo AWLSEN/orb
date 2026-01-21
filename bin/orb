@@ -72,7 +72,7 @@ add_namespace() {
     echo -e "${GREEN}✓${NC} Added namespace: $namespace"
 }
 
-# Remove namespace from sync list
+# Remove namespace from sync list (just unconfigure, keep files)
 remove_namespace() {
     local namespace="$1"
     local tmp_file=$(mktemp)
@@ -80,7 +80,40 @@ remove_namespace() {
     jq --arg ns "$namespace" '.namespaces -= [$ns]' "$CONFIG_FILE" > "$tmp_file"
     mv "$tmp_file" "$CONFIG_FILE"
 
-    echo -e "${GREEN}✓${NC} Removed namespace: $namespace"
+    echo -e "${GREEN}✓${NC} Removed namespace from sync: $namespace"
+    echo "  Files are still in: $COMMS_BASE/$namespace"
+}
+
+# Delete namespace completely (unconfigure + delete files)
+delete_namespace() {
+    local namespace="$1"
+
+    # Check if namespace exists
+    if [ ! -d "$COMMS_BASE/$namespace" ]; then
+        echo -e "${RED}✗${NC} Namespace not found: $namespace"
+        exit 1
+    fi
+
+    # Confirm deletion
+    echo -e "${YELLOW}⚠${NC}  This will permanently delete:"
+    echo "  $COMMS_BASE/$namespace"
+    echo ""
+    read -p "Are you sure? (type 'yes' to confirm): " confirm
+
+    if [ "$confirm" != "yes" ]; then
+        echo "Cancelled."
+        exit 0
+    fi
+
+    # Remove from config
+    local tmp_file=$(mktemp)
+    jq --arg ns "$namespace" '.namespaces -= [$ns]' "$CONFIG_FILE" > "$tmp_file"
+    mv "$tmp_file" "$CONFIG_FILE"
+
+    # Delete directory
+    rm -rf "$COMMS_BASE/$namespace"
+
+    echo -e "${GREEN}✓${NC} Deleted namespace: $namespace"
 }
 
 # List configured namespaces
@@ -176,9 +209,12 @@ push_plans() {
         # Create namespace directory in sync location
         mkdir -p "$sync_path/$namespace"
 
-        # Copy board.json
+        # Copy board.json (filter to only active and queued plans)
         if [ -f "$COMMS_BASE/$namespace/board.json" ]; then
-            cp "$COMMS_BASE/$namespace/board.json" "$sync_path/$namespace/board.json"
+            jq '{
+                project: .project,
+                plans: [.plans[] | select(.status == "active" or .status == "queued")]
+            }' "$COMMS_BASE/$namespace/board.json" > "$sync_path/$namespace/board.json"
         fi
 
         # Copy active plans
@@ -235,18 +271,25 @@ pull_plans() {
         # Create local namespace directory if it doesn't exist
         mkdir -p "$COMMS_BASE/$namespace"
 
-        # Merge board.json (newest wins for now - barebones approach)
+        # Merge board.json (keep local archived, merge remote active/queued)
         if [ -f "$sync_path/$namespace/board.json" ]; then
             if [ -f "$COMMS_BASE/$namespace/board.json" ]; then
-                # Simple merge: combine plans, remove duplicates by id, keep newest
+                # Smart merge:
+                # 1. Keep all local archived/review plans
+                # 2. Merge remote active/queued plans (newest wins)
                 local tmp_file=$(mktemp)
                 jq -s '
                     .[0] as $local | .[1] as $remote |
                     {
                         project: ($local.project // $remote.project),
-                        plans: ([$local.plans[], $remote.plans[]] |
-                                group_by(.id) |
-                                map(max_by(.createdAt // "1970-01-01T00:00:00Z")))
+                        plans: (
+                            # Local archived/review plans (not synced)
+                            [$local.plans[] | select(.status == "archived" or .status == "review")] +
+                            # Merge active/queued: combine local and remote, dedupe by id, keep newest
+                            ([$local.plans[] | select(.status == "active" or .status == "queued"), $remote.plans[]] |
+                             group_by(.id) |
+                             map(max_by(.createdAt // "1970-01-01T00:00:00Z")))
+                        )
                     }
                 ' "$COMMS_BASE/$namespace/board.json" "$sync_path/$namespace/board.json" > "$tmp_file"
                 mv "$tmp_file" "$COMMS_BASE/$namespace/board.json"
@@ -524,8 +567,10 @@ Usage:
   orb list                         List all available namespaces
   orb config set-sync-path <url>   Set sync server URL
   orb config add <namespace>       Add namespace to sync
-  orb config remove <namespace>    Remove namespace from sync
+  orb config remove <namespace>    Remove namespace (stop syncing, keep files)
   orb config list                  List configured namespaces
+
+  orb delete <namespace>           Delete namespace completely (removes files!)
 
   orb push                         Push plans to sync server
   orb pull                         Pull plans from sync server
@@ -600,6 +645,14 @@ EOF
                     exit 1
                     ;;
             esac
+            ;;
+        delete)
+            if [ $# -eq 0 ]; then
+                echo -e "${RED}✗${NC} Missing namespace argument"
+                echo "Usage: orb delete <namespace>"
+                exit 1
+            fi
+            delete_namespace "$1"
             ;;
         list)
             list_available_namespaces
